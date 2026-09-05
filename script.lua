@@ -1,36 +1,35 @@
---// Mad City Chapter 1 Stats Logger
---// Config is supplied through getgenv()
+--// Mad City Chapter 1 Background Stats Logger
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 
+local env = getgenv()
 local Player = Players.LocalPlayer
-local env = getgenv and getgenv() or _G
 
 --------------------------------------------------
--- CONFIG
+-- CONFIG FROM GETGENV
 --------------------------------------------------
 
 local WEBHOOK = env.MadCityWebhook
 local SEND_INTERVAL = tonumber(env.MadCityInterval) or 30
 
 if not WEBHOOK or WEBHOOK == "" then
-    error("[MadCity Stats] getgenv().MadCityWebhook is not set.")
+    error("[MadCity Stats] getgenv().MadCityWebhook is missing.")
 end
 
 --------------------------------------------------
--- PREVENT DUPLICATE LOOPS
+-- DON'T START TWICE
 --------------------------------------------------
 
-if env.MadCityStatsLoopRunning then
-    warn("[MadCity Stats] Already running.")
+if env.MadCityStatsRunning then
+    warn("[MadCity Stats] Background logger is already running.")
     return
 end
 
-env.MadCityStatsLoopRunning = true
+env.MadCityStatsRunning = true
 
 --------------------------------------------------
--- HTTP REQUEST
+-- HTTP FUNCTION
 --------------------------------------------------
 
 local requestFunc =
@@ -40,153 +39,157 @@ local requestFunc =
     or (syn and syn.request)
 
 if not requestFunc then
-    env.MadCityStatsLoopRunning = false
-    error("[MadCity Stats] HTTP request function not found.")
+    env.MadCityStatsRunning = false
+    error("[MadCity Stats] HTTP requests aren't supported.")
 end
 
 --------------------------------------------------
--- WAIT FOR STATS
+-- BACKGROUND THREAD
 --------------------------------------------------
 
-print("[MadCity Stats] Waiting for leaderstats...")
+task.spawn(function()
 
-local leaderstats = Player:WaitForChild("leaderstats", 30)
+    print("[MadCity Stats] Background logger started.")
 
-if not leaderstats then
-    env.MadCityStatsLoopRunning = false
-    error("[MadCity Stats] leaderstats not found.")
-end
+    --------------------------------------------------
+    -- WAIT FOR STATS
+    --------------------------------------------------
 
-local Cash = leaderstats:WaitForChild("Cash", 30)
-local Rank = leaderstats:WaitForChild("Rank", 30)
+    local leaderstats = Player:WaitForChild("leaderstats", 60)
 
-if not Cash or not Rank then
-    env.MadCityStatsLoopRunning = false
-    error("[MadCity Stats] Cash or Rank not found.")
-end
-
-print("[MadCity Stats] Stats found.")
-print("[MadCity Stats] Interval:", SEND_INTERVAL)
-
---------------------------------------------------
--- FORMAT NUMBERS
---------------------------------------------------
-
-local function formatNumber(number)
-    local str = tostring(number)
-
-    while true do
-        local newStr, count =
-            str:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
-
-        str = newStr
-
-        if count == 0 then
-            break
-        end
-    end
-
-    return str
-end
-
---------------------------------------------------
--- SEND
---------------------------------------------------
-
-local function sendStats()
-
-    if not Player.Parent then
+    if not leaderstats then
+        env.MadCityStatsRunning = false
+        warn("[MadCity Stats] leaderstats not found.")
         return
     end
 
-    local cashValue = Cash.Value
-    local rankValue = Rank.Value
+    local Cash = leaderstats:WaitForChild("Cash", 30)
+    local Rank = leaderstats:WaitForChild("Rank", 30)
 
-    local payload = {
-        username = "Mad City Stats",
+    if not Cash or not Rank then
+        env.MadCityStatsRunning = false
+        warn("[MadCity Stats] Cash or Rank not found.")
+        return
+    end
 
-        embeds = {
-            {
-                title = "Mad City: Chapter 1 Stats",
+    --------------------------------------------------
+    -- FORMAT CASH
+    --------------------------------------------------
 
-                description =
-                    "**" .. Player.DisplayName .. "**\n" ..
-                    "@" .. Player.Name,
+    local function formatNumber(number)
+        local str = tostring(number)
 
-                color = 5793266,
+        while true do
+            local newStr, count =
+                str:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
 
-                fields = {
-                    {
-                        name = "💰 Cash",
-                        value = "$" .. formatNumber(cashValue),
-                        inline = true
+            str = newStr
+
+            if count == 0 then
+                break
+            end
+        end
+
+        return str
+    end
+
+    --------------------------------------------------
+    -- SEND STATS
+    --------------------------------------------------
+
+    local function sendStats()
+
+        local cashValue = Cash.Value
+        local rankValue = Rank.Value
+
+        local payload = {
+            username = "Mad City Stats",
+
+            embeds = {
+                {
+                    title = "Mad City: Chapter 1 Stats",
+
+                    description =
+                        "**" .. Player.DisplayName .. "**\n" ..
+                        "@" .. Player.Name,
+
+                    color = 5793266,
+
+                    fields = {
+                        {
+                            name = "💰 Cash",
+                            value = "$" .. formatNumber(cashValue),
+                            inline = true
+                        },
+
+                        {
+                            name = "⭐ Rank",
+                            value = tostring(rankValue),
+                            inline = true
+                        },
+
+                        {
+                            name = "👤 Username",
+                            value = Player.Name,
+                            inline = true
+                        },
+
+                        {
+                            name = "🆔 User ID",
+                            value = tostring(Player.UserId),
+                            inline = true
+                        }
                     },
 
-                    {
-                        name = "⭐ Rank",
-                        value = tostring(rankValue),
-                        inline = true
+                    footer = {
+                        text =
+                            "Background update • every " ..
+                            tostring(SEND_INTERVAL) ..
+                            " seconds"
                     },
 
-                    {
-                        name = "👤 Username",
-                        value = Player.Name,
-                        inline = true
-                    },
-
-                    {
-                        name = "🆔 User ID",
-                        value = tostring(Player.UserId),
-                        inline = true
-                    }
-                },
-
-                footer = {
-                    text =
-                        "Updates every " ..
-                        tostring(SEND_INTERVAL) ..
-                        " seconds"
-                },
-
-                timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+                    timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+                }
             }
         }
-    }
 
-    local body = HttpService:JSONEncode(payload)
+        local body = HttpService:JSONEncode(payload)
 
-    local webhookURL = WEBHOOK
+        local url = WEBHOOK
 
-    if webhookURL:find("?", 1, true) then
-        webhookURL = webhookURL .. "&wait=true"
-    else
-        webhookURL = webhookURL .. "?wait=true"
-    end
+        if url:find("?", 1, true) then
+            url = url .. "&wait=true"
+        else
+            url = url .. "?wait=true"
+        end
 
-    local success, response = pcall(function()
-        return requestFunc({
-            Url = webhookURL,
-            Method = "POST",
+        local success, response = pcall(function()
+            return requestFunc({
+                Url = url,
+                Method = "POST",
 
-            Headers = {
-                ["Content-Type"] = "application/json"
-            },
+                Headers = {
+                    ["Content-Type"] = "application/json"
+                },
 
-            Body = body
-        })
-    end)
+                Body = body
+            })
+        end)
 
-    if not success then
-        warn("[MadCity Stats] Request failed:", response)
-        return
-    end
+        if not success then
+            warn("[MadCity Stats] Send failed:", response)
+            return
+        end
 
-    if type(response) == "table" then
-        local status =
-            response.StatusCode
-            or response.Status
-            or response.status
-            or response.status_code
+        local status
+
+        if type(response) == "table" then
+            status =
+                response.StatusCode
+                or response.Status
+                or response.status
+                or response.status_code
+        end
 
         print(
             "[MadCity Stats] Sent | Cash:",
@@ -196,28 +199,25 @@ local function sendStats()
             "| HTTP:",
             status or "unknown"
         )
-    else
-        print(
-            "[MadCity Stats] Sent | Cash:",
-            cashValue,
-            "| Rank:",
-            rankValue
-        )
     end
-end
 
---------------------------------------------------
--- START LOOP
---------------------------------------------------
+    --------------------------------------------------
+    -- LOOP FOREVER
+    --------------------------------------------------
 
-sendStats()
+    while env.MadCityStatsRunning do
 
-while env.MadCityStatsLoopRunning do
-    task.wait(SEND_INTERVAL)
+        local success, err = pcall(sendStats)
 
-    local success, err = pcall(sendStats)
+        if not success then
+            warn("[MadCity Stats] Background error:", err)
+        end
 
-    if not success then
-        warn("[MadCity Stats] Error:", err)
+        task.wait(SEND_INTERVAL)
     end
-end
+
+    print("[MadCity Stats] Background logger stopped.")
+
+end)
+
+print("[MadCity Stats] Script loaded. Running in background.")
