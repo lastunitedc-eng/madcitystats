@@ -1,4 +1,5 @@
---// Mad City Chapter 1 Background Stats Logger
+--// Mad City Chapter 1 Cash Gain Logger
+--// Sends when you earn 10k+ Cash
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
@@ -7,29 +8,30 @@ local env = getgenv()
 local Player = Players.LocalPlayer
 
 --------------------------------------------------
--- CONFIG FROM GETGENV
+-- CONFIG
 --------------------------------------------------
 
 local WEBHOOK = env.MadCityWebhook
-local SEND_INTERVAL = tonumber(env.MadCityInterval) or 30
+local MIN_GAIN = tonumber(env.MadCityMinGain) or 10000
 
 if not WEBHOOK or WEBHOOK == "" then
-    error("[MadCity Stats] getgenv().MadCityWebhook is missing.")
+    error("[MadCity Stats] MadCityWebhook is missing.")
 end
 
 --------------------------------------------------
--- DON'T START TWICE
+-- REMOVE OLD LISTENER IF SCRIPT IS RE-EXECUTED
 --------------------------------------------------
 
-if env.MadCityStatsRunning then
-    warn("[MadCity Stats] Background logger is already running.")
-    return
+if env.MadCityCashConnection then
+    pcall(function()
+        env.MadCityCashConnection:Disconnect()
+    end)
+
+    env.MadCityCashConnection = nil
 end
 
-env.MadCityStatsRunning = true
-
 --------------------------------------------------
--- HTTP FUNCTION
+-- HTTP REQUEST
 --------------------------------------------------
 
 local requestFunc =
@@ -37,187 +39,200 @@ local requestFunc =
     or http_request
     or (http and http.request)
     or (syn and syn.request)
+    or (fluxus and fluxus.request)
 
 if not requestFunc then
-    env.MadCityStatsRunning = false
-    error("[MadCity Stats] HTTP requests aren't supported.")
+    error("[MadCity Stats] No HTTP request function found.")
 end
 
 --------------------------------------------------
--- BACKGROUND THREAD
+-- WAIT FOR STATS
 --------------------------------------------------
 
-task.spawn(function()
+local leaderstats = Player:WaitForChild("leaderstats", 60)
 
-    print("[MadCity Stats] Background logger started.")
+if not leaderstats then
+    error("[MadCity Stats] leaderstats not found.")
+end
 
-    --------------------------------------------------
-    -- WAIT FOR STATS
-    --------------------------------------------------
+local Cash = leaderstats:WaitForChild("Cash", 30)
+local Rank = leaderstats:WaitForChild("Rank", 30)
 
-    local leaderstats = Player:WaitForChild("leaderstats", 60)
+if not Cash then
+    error("[MadCity Stats] Cash not found.")
+end
 
-    if not leaderstats then
-        env.MadCityStatsRunning = false
-        warn("[MadCity Stats] leaderstats not found.")
-        return
-    end
+if not Rank then
+    error("[MadCity Stats] Rank not found.")
+end
 
-    local Cash = leaderstats:WaitForChild("Cash", 30)
-    local Rank = leaderstats:WaitForChild("Rank", 30)
+--------------------------------------------------
+-- FORMAT NUMBER
+--------------------------------------------------
 
-    if not Cash or not Rank then
-        env.MadCityStatsRunning = false
-        warn("[MadCity Stats] Cash or Rank not found.")
-        return
-    end
+local function formatNumber(number)
+    local str = tostring(math.floor(tonumber(number) or 0))
 
-    --------------------------------------------------
-    -- FORMAT CASH
-    --------------------------------------------------
+    while true do
+        local newStr, count =
+            str:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
 
-    local function formatNumber(number)
-        local str = tostring(number)
+        str = newStr
 
-        while true do
-            local newStr, count =
-                str:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
-
-            str = newStr
-
-            if count == 0 then
-                break
-            end
+        if count == 0 then
+            break
         end
-
-        return str
     end
 
-    --------------------------------------------------
-    -- SEND STATS
-    --------------------------------------------------
+    return str
+end
 
-    local function sendStats()
+--------------------------------------------------
+-- SEND WEBHOOK
+--------------------------------------------------
 
-        local cashValue = Cash.Value
-        local rankValue = Rank.Value
+local function sendWebhook(gained, currentCash)
 
-        local payload = {
-            username = "Mad City Stats",
+    local payload = {
+        username = "Mad City Stats",
 
-            embeds = {
-                {
-                    title = "Mad City: Chapter 1 Stats",
+        embeds = {
+            {
+                title = "💰 Cash Milestone",
 
-                    description =
-                        "**" .. Player.DisplayName .. "**\n" ..
-                        "@" .. Player.Name,
+                description =
+                    "**" .. Player.DisplayName .. "** " ..
+                    "(@" .. Player.Name .. ") earned enough cash.",
 
-                    color = 5793266,
+                color = 0x57F287,
 
-                    fields = {
-                        {
-                            name = "💰 Cash",
-                            value = "$" .. formatNumber(cashValue),
-                            inline = true
-                        },
-
-                        {
-                            name = "⭐ Rank",
-                            value = tostring(rankValue),
-                            inline = true
-                        },
-
-                        {
-                            name = "👤 Username",
-                            value = Player.Name,
-                            inline = true
-                        },
-
-                        {
-                            name = "🆔 User ID",
-                            value = tostring(Player.UserId),
-                            inline = true
-                        }
+                fields = {
+                    {
+                        name = "💵 Cash Gained",
+                        value = "+$" .. formatNumber(gained),
+                        inline = true
                     },
 
-                    footer = {
-                        text =
-                            "Background update • every " ..
-                            tostring(SEND_INTERVAL) ..
-                            " seconds"
+                    {
+                        name = "💰 Current Cash",
+                        value = "$" .. formatNumber(currentCash),
+                        inline = true
                     },
 
-                    timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
-                }
-            }
-        }
-
-        local body = HttpService:JSONEncode(payload)
-
-        local url = WEBHOOK
-
-        if url:find("?", 1, true) then
-            url = url .. "&wait=true"
-        else
-            url = url .. "?wait=true"
-        end
-
-        local success, response = pcall(function()
-            return requestFunc({
-                Url = url,
-                Method = "POST",
-
-                Headers = {
-                    ["Content-Type"] = "application/json"
+                    {
+                        name = "⭐ Rank",
+                        value = tostring(Rank.Value),
+                        inline = true
+                    }
                 },
 
-                Body = body
-            })
-        end)
+                footer = {
+                    text =
+                        "Notification threshold: $" ..
+                        formatNumber(MIN_GAIN)
+                },
 
-        if not success then
-            warn("[MadCity Stats] Send failed:", response)
-            return
-        end
+                timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+            }
+        }
+    }
 
-        local status
+    local url = WEBHOOK
 
-        if type(response) == "table" then
-            status =
-                response.StatusCode
-                or response.Status
-                or response.status
-                or response.status_code
-        end
+    if url:find("?", 1, true) then
+        url = url .. "&wait=true"
+    else
+        url = url .. "?wait=true"
+    end
+
+    local success, response = pcall(function()
+        return requestFunc({
+            Url = url,
+            Method = "POST",
+
+            Headers = {
+                ["Content-Type"] = "application/json"
+            },
+
+            Body = HttpService:JSONEncode(payload)
+        })
+    end)
+
+    if not success then
+        warn("[MadCity Stats] Webhook failed:", response)
+        return
+    end
+
+    local status
+
+    if type(response) == "table" then
+        status =
+            response.StatusCode
+            or response.Status
+            or response.status
+            or response.status_code
+    end
+
+    print(
+        "[MadCity Stats] Webhook sent | Gain:",
+        gained,
+        "| Cash:",
+        currentCash,
+        "| HTTP:",
+        status or "unknown"
+    )
+end
+
+--------------------------------------------------
+-- CASH TRACKING
+--------------------------------------------------
+
+local lastCash = tonumber(Cash.Value) or 0
+local gainedSinceLastSend = 0
+
+print("[MadCity Stats] Cash watcher started.")
+print("[MadCity Stats] Starting Cash:", lastCash)
+print("[MadCity Stats] Notify every +$" .. formatNumber(MIN_GAIN))
+
+env.MadCityCashConnection = Cash:GetPropertyChangedSignal("Value"):Connect(function()
+
+    local currentCash = tonumber(Cash.Value)
+
+    if not currentCash then
+        return
+    end
+
+    local difference = currentCash - lastCash
+
+    -- Only count money gained.
+    -- Spending money won't reduce progress.
+    if difference > 0 then
+
+        gainedSinceLastSend += difference
 
         print(
-            "[MadCity Stats] Sent | Cash:",
-            cashValue,
-            "| Rank:",
-            rankValue,
-            "| HTTP:",
-            status or "unknown"
+            "[MadCity Stats] +$" .. formatNumber(difference),
+            "| Progress: $" ..
+            formatNumber(gainedSinceLastSend) ..
+            "/" ..
+            formatNumber(MIN_GAIN)
         )
-    end
 
-    --------------------------------------------------
-    -- LOOP FOREVER
-    --------------------------------------------------
+        if gainedSinceLastSend >= MIN_GAIN then
 
-    while env.MadCityStatsRunning do
+            local gained = gainedSinceLastSend
 
-        local success, err = pcall(sendStats)
+            -- Reset after notification
+            gainedSinceLastSend = 0
 
-        if not success then
-            warn("[MadCity Stats] Background error:", err)
+            task.spawn(function()
+                sendWebhook(gained, currentCash)
+            end)
+
         end
-
-        task.wait(SEND_INTERVAL)
     end
 
-    print("[MadCity Stats] Background logger stopped.")
-
+    lastCash = currentCash
 end)
 
-print("[MadCity Stats] Script loaded. Running in background.")
+print("[MadCity Stats] Running in background.")
