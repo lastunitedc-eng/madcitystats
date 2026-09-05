@@ -1,6 +1,5 @@
 --// Mad City Chapter 1 Stats Logger
---// Cash milestone logger
---// Persists progress through server hops when executor filesystem is supported
+--// Cash milestone + timer + server-hop persistence
 
 --------------------------------------------------
 -- SERVICES
@@ -23,7 +22,7 @@ local CONFIG_FILE = "madcitystats_config.json"
 local STATE_FILE = "madcitystats_state.json"
 
 --------------------------------------------------
--- FILESYSTEM SUPPORT
+-- FILESYSTEM
 --------------------------------------------------
 
 local hasFilesystem =
@@ -31,6 +30,7 @@ local hasFilesystem =
     and type(readfile) == "function"
 
 local function fileExists(path)
+
     if type(isfile) == "function" then
         local success, result = pcall(isfile, path)
 
@@ -47,18 +47,22 @@ local function fileExists(path)
 end
 
 --------------------------------------------------
--- LOAD SAVED CONFIG
+-- LOAD CONFIG
 --------------------------------------------------
 
 local savedConfig = {}
 
 if hasFilesystem and fileExists(CONFIG_FILE) then
+
     pcall(function()
+
         savedConfig =
             HttpService:JSONDecode(
                 readfile(CONFIG_FILE)
             )
+
     end)
+
 end
 
 --------------------------------------------------
@@ -88,6 +92,7 @@ env.MadCityMinGain = MIN_GAIN
 --------------------------------------------------
 
 if hasFilesystem then
+
     pcall(function()
 
         writefile(
@@ -100,13 +105,21 @@ if hasFilesystem then
         )
 
     end)
+
 end
 
 --------------------------------------------------
--- LOAD SAVED PROGRESS
+-- STATE
 --------------------------------------------------
 
 local accumulatedGain = 0
+
+-- Unix timestamp for when the current earning cycle began
+local cycleStartedAt = os.time()
+
+--------------------------------------------------
+-- LOAD SAVED STATE
+--------------------------------------------------
 
 if hasFilesystem and fileExists(STATE_FILE) then
 
@@ -121,21 +134,43 @@ if hasFilesystem and fileExists(STATE_FILE) then
     if success and type(data) == "table" then
 
         if tonumber(data.UserId) == Player.UserId then
+
             accumulatedGain =
-                tonumber(data.AccumulatedGain) or 0
+                tonumber(data.AccumulatedGain)
+                or 0
+
+            cycleStartedAt =
+                tonumber(data.CycleStartedAt)
+                or os.time()
+
         end
 
     end
+
+else
+
+    -- Fallback for same executor environment
+    accumulatedGain =
+        tonumber(env.MadCityAccumulatedGain)
+        or 0
+
+    cycleStartedAt =
+        tonumber(env.MadCityCycleStartedAt)
+        or os.time()
+
 end
 
 --------------------------------------------------
--- SAVE PROGRESS
+-- SAVE STATE
 --------------------------------------------------
 
-local function saveProgress()
+local function saveState()
 
     env.MadCityAccumulatedGain =
         accumulatedGain
+
+    env.MadCityCycleStartedAt =
+        cycleStartedAt
 
     if not hasFilesystem then
         return
@@ -148,8 +183,15 @@ local function saveProgress()
 
             HttpService:JSONEncode({
                 UserId = Player.UserId,
-                AccumulatedGain = accumulatedGain,
-                MinGain = MIN_GAIN
+
+                AccumulatedGain =
+                    accumulatedGain,
+
+                CycleStartedAt =
+                    cycleStartedAt,
+
+                MinGain =
+                    MIN_GAIN
             })
         )
 
@@ -157,35 +199,132 @@ local function saveProgress()
 
 end
 
-saveProgress()
+saveState()
 
 --------------------------------------------------
--- STARTUP
+-- FORMAT NUMBER
+--------------------------------------------------
+
+local function formatNumber(number)
+
+    local num =
+        tonumber(number) or 0
+
+    local str =
+        tostring(math.floor(num))
+
+    while true do
+
+        local newString, count =
+            str:gsub(
+                "^(-?%d+)(%d%d%d)",
+                "%1,%2"
+            )
+
+        str = newString
+
+        if count == 0 then
+            break
+        end
+
+    end
+
+    return str
+end
+
+--------------------------------------------------
+-- FORMAT TIME
+--------------------------------------------------
+
+local function formatDuration(seconds)
+
+    seconds =
+        math.max(
+            0,
+            math.floor(
+                tonumber(seconds) or 0
+            )
+        )
+
+    local days =
+        math.floor(seconds / 86400)
+
+    seconds =
+        seconds % 86400
+
+    local hours =
+        math.floor(seconds / 3600)
+
+    seconds =
+        seconds % 3600
+
+    local minutes =
+        math.floor(seconds / 60)
+
+    local secs =
+        seconds % 60
+
+    if days > 0 then
+
+        return string.format(
+            "%dd %dh %dm %ds",
+            days,
+            hours,
+            minutes,
+            secs
+        )
+
+    elseif hours > 0 then
+
+        return string.format(
+            "%dh %dm %ds",
+            hours,
+            minutes,
+            secs
+        )
+
+    elseif minutes > 0 then
+
+        return string.format(
+            "%dm %ds",
+            minutes,
+            secs
+        )
+
+    else
+
+        return string.format(
+            "%ds",
+            secs
+        )
+
+    end
+end
+
+--------------------------------------------------
+-- START INFO
 --------------------------------------------------
 
 print("[MadCity Stats] Starting...")
-print("[MadCity Stats] Minimum gain:", MIN_GAIN)
+print(
+    "[MadCity Stats] Minimum gain:",
+    MIN_GAIN
+)
+
 print(
     "[MadCity Stats] Saved progress:",
     accumulatedGain
 )
 
-if hasFilesystem then
-    print(
-        "[MadCity Stats] Persistent progress enabled."
+print(
+    "[MadCity Stats] Current timer:",
+    formatDuration(
+        os.time() - cycleStartedAt
     )
-else
-    warn(
-        "[MadCity Stats] Executor filesystem unavailable."
-    )
-
-    warn(
-        "[MadCity Stats] Progress may reset after server hops."
-    )
-end
+)
 
 --------------------------------------------------
--- HTTP REQUEST
+-- HTTP
 --------------------------------------------------
 
 local requestFunc =
@@ -196,13 +335,15 @@ local requestFunc =
     or (fluxus and fluxus.request)
 
 if not requestFunc then
+
     error(
-        "[MadCity Stats] No HTTP request function found."
+        "[MadCity Stats] No HTTP request function."
     )
+
 end
 
 --------------------------------------------------
--- QUEUE AFTER TELEPORT
+-- QUEUE ON TELEPORT
 --------------------------------------------------
 
 local queueTeleport =
@@ -219,74 +360,89 @@ if queueTeleport then
         local queuedCode
 
         --------------------------------------------------
-        -- FILESYSTEM MODE
+        -- FILESYSTEM VERSION
         --------------------------------------------------
 
         if hasFilesystem then
 
-            queuedCode = string.format([[
-                repeat
-                    task.wait()
-                until game:IsLoaded()
+            queuedCode =
+                string.format([[
+                    repeat
+                        task.wait()
+                    until game:IsLoaded()
 
-                task.wait(2)
+                    task.wait(2)
 
-                getgenv().MadCityStatsQueued = nil
-                getgenv().MadCityStatsRunning = nil
-                getgenv().MadCityCashConnection = nil
+                    getgenv().MadCityStatsQueued = nil
+                    getgenv().MadCityStatsRunning = nil
+                    getgenv().MadCityCashConnection = nil
+                    getgenv().MadCityTimerRunning = nil
 
-                loadstring(game:HttpGet(%q))()
-            ]],
-                SCRIPT_URL
-            )
+                    loadstring(game:HttpGet(%q))()
+                ]],
+                    SCRIPT_URL
+                )
 
         --------------------------------------------------
-        -- FALLBACK MODE
+        -- FALLBACK
         --------------------------------------------------
 
         else
 
-            queuedCode = string.format([[
-                repeat
-                    task.wait()
-                until game:IsLoaded()
+            queuedCode =
+                string.format([[
+                    repeat
+                        task.wait()
+                    until game:IsLoaded()
 
-                task.wait(2)
+                    task.wait(2)
 
-                getgenv().MadCityWebhook = %q
-                getgenv().MadCityMinGain = %d
+                    getgenv().MadCityWebhook = %q
+                    getgenv().MadCityMinGain = %d
 
-                getgenv().MadCityAccumulatedGain = %d
+                    getgenv().MadCityAccumulatedGain = %d
+                    getgenv().MadCityCycleStartedAt = %d
 
-                getgenv().MadCityStatsQueued = nil
-                getgenv().MadCityStatsRunning = nil
-                getgenv().MadCityCashConnection = nil
+                    getgenv().MadCityStatsQueued = nil
+                    getgenv().MadCityStatsRunning = nil
+                    getgenv().MadCityCashConnection = nil
+                    getgenv().MadCityTimerRunning = nil
 
-                loadstring(game:HttpGet(%q))()
-            ]],
-                WEBHOOK,
-                MIN_GAIN,
-                accumulatedGain,
-                SCRIPT_URL
-            )
+                    loadstring(game:HttpGet(%q))()
+                ]],
+                    WEBHOOK,
+                    MIN_GAIN,
+                    accumulatedGain,
+                    cycleStartedAt,
+                    SCRIPT_URL
+                )
 
         end
 
         local success, err =
             pcall(function()
-                queueTeleport(queuedCode)
+
+                queueTeleport(
+                    queuedCode
+                )
+
             end)
 
         if success then
+
             print(
                 "[MadCity Stats] Queued for next server hop."
             )
+
         else
+
             warn(
-                "[MadCity Stats] queue_on_teleport error:",
+                "[MadCity Stats] Teleport queue failed:",
                 err
             )
+
         end
+
     end
 
 else
@@ -298,33 +454,39 @@ else
 end
 
 --------------------------------------------------
--- PREVENT DUPLICATE WATCHERS
+-- PREVENT DUPLICATE
 --------------------------------------------------
 
 if env.MadCityStatsRunning then
+
     warn(
         "[MadCity Stats] Already running."
     )
+
     return
 end
 
 env.MadCityStatsRunning = true
 
 --------------------------------------------------
--- OLD CONNECTION
+-- REMOVE OLD CONNECTION
 --------------------------------------------------
 
 if env.MadCityCashConnection then
 
     pcall(function()
-        env.MadCityCashConnection:Disconnect()
+
+        env.MadCityCashConnection:
+            Disconnect()
+
     end)
 
     env.MadCityCashConnection = nil
+
 end
 
 --------------------------------------------------
--- LEADERSTATS
+-- WAIT FOR LEADERSTATS
 --------------------------------------------------
 
 print(
@@ -344,11 +506,8 @@ if not leaderstats then
     error(
         "[MadCity Stats] leaderstats not found."
     )
-end
 
---------------------------------------------------
--- CASH + RANK
---------------------------------------------------
+end
 
 local Cash =
     leaderstats:WaitForChild(
@@ -362,22 +521,14 @@ local Rank =
         30
     )
 
-if not Cash then
+if not Cash or not Rank then
 
     env.MadCityStatsRunning = false
 
     error(
-        "[MadCity Stats] Cash not found."
+        "[MadCity Stats] Cash or Rank not found."
     )
-end
 
-if not Rank then
-
-    env.MadCityStatsRunning = false
-
-    error(
-        "[MadCity Stats] Rank not found."
-    )
 end
 
 print(
@@ -395,40 +546,10 @@ print(
 )
 
 --------------------------------------------------
--- NUMBER FORMAT
---------------------------------------------------
-
-local function formatNumber(number)
-
-    local num =
-        tonumber(number) or 0
-
-    local stringNumber =
-        tostring(math.floor(num))
-
-    while true do
-
-        local newString, count =
-            stringNumber:gsub(
-                "^(-?%d+)(%d%d%d)",
-                "%1,%2"
-            )
-
-        stringNumber = newString
-
-        if count == 0 then
-            break
-        end
-    end
-
-    return stringNumber
-end
-
---------------------------------------------------
 -- WEBHOOK URL
 --------------------------------------------------
 
-local function webhookURL()
+local function getWebhookURL()
 
     if WEBHOOK:find(
         "?",
@@ -447,19 +568,23 @@ local function webhookURL()
 end
 
 --------------------------------------------------
--- SEND DISCORD
+-- SEND WEBHOOK
 --------------------------------------------------
 
 local function sendWebhook(
     gained,
-    currentCash
+    currentCash,
+    elapsed
 )
 
     local payload = {
-        username = "Mad City Stats",
+
+        username =
+            "Mad City Stats",
 
         embeds = {
             {
+
                 title =
                     "💰 Mad City Cash Update",
 
@@ -469,9 +594,11 @@ local function sendWebhook(
                     "**\n@" ..
                     Player.Name,
 
-                color = 5763719,
+                color =
+                    5763719,
 
                 fields = {
+
                     {
                         name =
                             "💵 Cash Gained",
@@ -482,7 +609,21 @@ local function sendWebhook(
                                 gained
                             ),
 
-                        inline = true
+                        inline =
+                            true
+                    },
+
+                    {
+                        name =
+                            "⏱️ Time Taken",
+
+                        value =
+                            formatDuration(
+                                elapsed
+                            ),
+
+                        inline =
+                            true
                     },
 
                     {
@@ -495,18 +636,21 @@ local function sendWebhook(
                                 currentCash
                             ),
 
-                        inline = true
+                        inline =
+                            true
                     },
 
                     {
-                        name = "⭐ Rank",
+                        name =
+                            "⭐ Rank",
 
                         value =
                             tostring(
                                 Rank.Value
                             ),
 
-                        inline = true
+                        inline =
+                            true
                     },
 
                     {
@@ -516,7 +660,8 @@ local function sendWebhook(
                         value =
                             Player.Name,
 
-                        inline = true
+                        inline =
+                            true
                     },
 
                     {
@@ -528,8 +673,10 @@ local function sendWebhook(
                                 Player.UserId
                             ),
 
-                        inline = true
+                        inline =
+                            true
                     }
+
                 },
 
                 footer = {
@@ -544,45 +691,42 @@ local function sendWebhook(
                     os.date(
                         "!%Y-%m-%dT%H:%M:%SZ"
                     )
+
             }
         }
     }
 
-    --------------------------------------------------
-    -- JSON
-    --------------------------------------------------
+    local encoded
 
-    local successEncode,
-          encoded =
+    local encodeSuccess,
+          encodeError =
         pcall(function()
 
-            return HttpService:JSONEncode(
-                payload
-            )
+            encoded =
+                HttpService:JSONEncode(
+                    payload
+                )
 
         end)
 
-    if not successEncode then
+    if not encodeSuccess then
 
         warn(
             "[MadCity Stats] JSON error:",
-            encoded
+            encodeError
         )
 
         return false
     end
-
-    --------------------------------------------------
-    -- REQUEST
-    --------------------------------------------------
 
     local success,
           response =
         pcall(function()
 
             return requestFunc({
+
                 Url =
-                    webhookURL(),
+                    getWebhookURL(),
 
                 Method =
                     "POST",
@@ -594,6 +738,7 @@ local function sendWebhook(
 
                 Body =
                     encoded
+
             })
 
         end)
@@ -607,10 +752,6 @@ local function sendWebhook(
 
         return false
     end
-
-    --------------------------------------------------
-    -- RESPONSE
-    --------------------------------------------------
 
     local status
 
@@ -626,8 +767,10 @@ local function sendWebhook(
 
     print(
         "[MadCity Stats] Discord sent",
-        "| Gain:",
+        "| Gained:",
         gained,
+        "| Time:",
+        formatDuration(elapsed),
         "| Cash:",
         currentCash,
         "| HTTP:",
@@ -651,31 +794,12 @@ local function sendWebhook(
 end
 
 --------------------------------------------------
--- CURRENT CASH
+-- CASH WATCHER
 --------------------------------------------------
 
 local lastCash =
-    tonumber(Cash.Value) or 0
-
---------------------------------------------------
--- RESTORE GETGENV FALLBACK
---------------------------------------------------
-
-if not hasFilesystem then
-
-    accumulatedGain =
-        tonumber(
-            env.MadCityAccumulatedGain
-        )
-        or accumulatedGain
-
-end
-
-saveProgress()
-
---------------------------------------------------
--- CASH WATCHER
---------------------------------------------------
+    tonumber(Cash.Value)
+    or 0
 
 env.MadCityCashConnection =
     Cash:GetPropertyChangedSignal(
@@ -693,7 +817,7 @@ env.MadCityCashConnection =
             currentCash - lastCash
 
         --------------------------------------------------
-        -- POSITIVE CASH ONLY
+        -- ONLY POSITIVE GAINS
         --------------------------------------------------
 
         if difference > 0 then
@@ -701,7 +825,11 @@ env.MadCityCashConnection =
             accumulatedGain +=
                 difference
 
-            saveProgress()
+            saveState()
+
+            local elapsed =
+                os.time() -
+                cycleStartedAt
 
             print(
                 "[MadCity Stats] +$" ..
@@ -716,11 +844,16 @@ env.MadCityCashConnection =
                 " / $" ..
                 formatNumber(
                     MIN_GAIN
+                ),
+
+                "| Time:",
+                formatDuration(
+                    elapsed
                 )
             )
 
             --------------------------------------------------
-            -- HIT THRESHOLD
+            -- THRESHOLD REACHED
             --------------------------------------------------
 
             if accumulatedGain >= MIN_GAIN then
@@ -728,23 +861,33 @@ env.MadCityCashConnection =
                 local gained =
                     accumulatedGain
 
+                local oldStartedAt =
+                    cycleStartedAt
+
+                local timeTaken =
+                    os.time() -
+                    oldStartedAt
+
                 --------------------------------------------------
-                -- RESET FIRST
+                -- RESET NEXT CYCLE
                 --------------------------------------------------
 
                 accumulatedGain = 0
-                saveProgress()
+                cycleStartedAt = os.time()
+
+                saveState()
 
                 task.spawn(function()
 
                     local sent =
                         sendWebhook(
                             gained,
-                            currentCash
+                            currentCash,
+                            timeTaken
                         )
 
                     --------------------------------------------------
-                    -- IF WEBHOOK FAILED, RESTORE PROGRESS
+                    -- RESTORE IF SEND FAILED
                     --------------------------------------------------
 
                     if not sent then
@@ -752,21 +895,64 @@ env.MadCityCashConnection =
                         accumulatedGain +=
                             gained
 
-                        saveProgress()
+                        cycleStartedAt =
+                            oldStartedAt
+
+                        saveState()
 
                         warn(
-                            "[MadCity Stats] Restored progress because webhook failed."
+                            "[MadCity Stats] Webhook failed; progress + timer restored."
                         )
 
                     end
 
                 end)
+
             end
         end
 
         lastCash =
             currentCash
+
     end)
+
+--------------------------------------------------
+-- LIVE TIMER IN CONSOLE
+--------------------------------------------------
+
+env.MadCityTimerRunning = true
+
+task.spawn(function()
+
+    while env.MadCityTimerRunning
+        and env.MadCityStatsRunning
+    do
+
+        task.wait(10)
+
+        if not env.MadCityStatsRunning then
+            break
+        end
+
+        print(
+            "[MadCity Stats] Progress: $" ..
+            formatNumber(
+                accumulatedGain
+            ) ..
+            " / $" ..
+            formatNumber(
+                MIN_GAIN
+            ) ..
+            " | Timer: " ..
+            formatDuration(
+                os.time() -
+                cycleStartedAt
+            )
+        )
+
+    end
+
+end)
 
 --------------------------------------------------
 -- READY
@@ -784,6 +970,14 @@ print(
     " / $" ..
     formatNumber(
         MIN_GAIN
+    )
+)
+
+print(
+    "[MadCity Stats] Timer: " ..
+    formatDuration(
+        os.time() -
+        cycleStartedAt
     )
 )
 
