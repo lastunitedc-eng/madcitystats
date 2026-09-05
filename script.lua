@@ -1,24 +1,26 @@
---// Mad City Chapter 1 -> Discord Stats
---// Auto Execute / Delta
---// Sends Cash + Rank every 30 seconds
+--// Mad City Chapter 1 Stats Logger
+--// Config is supplied through getgenv()
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 
 local Player = Players.LocalPlayer
+local env = getgenv and getgenv() or _G
 
 --------------------------------------------------
 -- CONFIG
 --------------------------------------------------
 
-local WEBHOOK = "PUT_YOUR_NEW_WEBHOOK_HERE"
-local SEND_INTERVAL = 30
+local WEBHOOK = env.MadCityWebhook
+local SEND_INTERVAL = tonumber(env.MadCityInterval) or 30
+
+if not WEBHOOK or WEBHOOK == "" then
+    error("[MadCity Stats] getgenv().MadCityWebhook is not set.")
+end
 
 --------------------------------------------------
--- PREVENT MULTIPLE LOOPS
+-- PREVENT DUPLICATE LOOPS
 --------------------------------------------------
-
-local env = getgenv and getgenv() or _G
 
 if env.MadCityStatsLoopRunning then
     warn("[MadCity Stats] Already running.")
@@ -28,7 +30,7 @@ end
 env.MadCityStatsLoopRunning = true
 
 --------------------------------------------------
--- REQUEST FUNCTION
+-- HTTP REQUEST
 --------------------------------------------------
 
 local requestFunc =
@@ -39,11 +41,11 @@ local requestFunc =
 
 if not requestFunc then
     env.MadCityStatsLoopRunning = false
-    error("[MadCity Stats] No HTTP request function found.")
+    error("[MadCity Stats] HTTP request function not found.")
 end
 
 --------------------------------------------------
--- WAIT FOR LEADERSTATS
+-- WAIT FOR STATS
 --------------------------------------------------
 
 print("[MadCity Stats] Waiting for leaderstats...")
@@ -58,31 +60,26 @@ end
 local Cash = leaderstats:WaitForChild("Cash", 30)
 local Rank = leaderstats:WaitForChild("Rank", 30)
 
-if not Cash then
+if not Cash or not Rank then
     env.MadCityStatsLoopRunning = false
-    error("[MadCity Stats] Cash not found.")
-end
-
-if not Rank then
-    env.MadCityStatsLoopRunning = false
-    error("[MadCity Stats] Rank not found.")
+    error("[MadCity Stats] Cash or Rank not found.")
 end
 
 print("[MadCity Stats] Stats found.")
-print("[MadCity Stats] Sending every " .. SEND_INTERVAL .. " seconds.")
+print("[MadCity Stats] Interval:", SEND_INTERVAL)
 
 --------------------------------------------------
--- FORMAT NUMBER
+-- FORMAT NUMBERS
 --------------------------------------------------
 
-local function formatNumber(num)
-    local str = tostring(num)
+local function formatNumber(number)
+    local str = tostring(number)
 
     while true do
-        local newString, count =
+        local newStr, count =
             str:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
 
-        str = newString
+        str = newStr
 
         if count == 0 then
             break
@@ -93,20 +90,17 @@ local function formatNumber(num)
 end
 
 --------------------------------------------------
--- SEND FUNCTION
+-- SEND
 --------------------------------------------------
 
 local function sendStats()
 
+    if not Player.Parent then
+        return
+    end
+
     local cashValue = Cash.Value
     local rankValue = Rank.Value
-
-    print(
-        "[MadCity Stats] Cash:",
-        cashValue,
-        "| Rank:",
-        rankValue
-    )
 
     local payload = {
         username = "Mad City Stats",
@@ -148,7 +142,10 @@ local function sendStats()
                 },
 
                 footer = {
-                    text = "Updates every 30 seconds"
+                    text =
+                        "Updates every " ..
+                        tostring(SEND_INTERVAL) ..
+                        " seconds"
                 },
 
                 timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
@@ -156,29 +153,27 @@ local function sendStats()
         }
     }
 
-    local json = HttpService:JSONEncode(payload)
+    local body = HttpService:JSONEncode(payload)
 
-    local url = WEBHOOK
+    local webhookURL = WEBHOOK
 
-    if url:find("?", 1, true) then
-        url = url .. "&wait=true"
+    if webhookURL:find("?", 1, true) then
+        webhookURL = webhookURL .. "&wait=true"
     else
-        url = url .. "?wait=true"
+        webhookURL = webhookURL .. "?wait=true"
     end
 
     local success, response = pcall(function()
-
         return requestFunc({
-            Url = url,
+            Url = webhookURL,
             Method = "POST",
 
             Headers = {
                 ["Content-Type"] = "application/json"
             },
 
-            Body = json
+            Body = body
         })
-
     end)
 
     if not success then
@@ -187,46 +182,42 @@ local function sendStats()
     end
 
     if type(response) == "table" then
-
         local status =
             response.StatusCode
             or response.Status
             or response.status
             or response.status_code
 
-        if status == 200 or status == 204 then
-            print("[MadCity Stats] Sent successfully.")
-        else
-            warn(
-                "[MadCity Stats] HTTP status:",
-                status or "unknown"
-            )
-
-            if response.Body then
-                print(response.Body)
-            end
-        end
-
+        print(
+            "[MadCity Stats] Sent | Cash:",
+            cashValue,
+            "| Rank:",
+            rankValue,
+            "| HTTP:",
+            status or "unknown"
+        )
     else
-        print("[MadCity Stats] Request completed.")
+        print(
+            "[MadCity Stats] Sent | Cash:",
+            cashValue,
+            "| Rank:",
+            rankValue
+        )
     end
 end
 
 --------------------------------------------------
--- LOOP
+-- START LOOP
 --------------------------------------------------
 
--- Send immediately when joining
 sendStats()
 
 while env.MadCityStatsLoopRunning do
-
     task.wait(SEND_INTERVAL)
 
     local success, err = pcall(sendStats)
 
     if not success then
-        warn("[MadCity Stats] Loop error:", err)
+        warn("[MadCity Stats] Error:", err)
     end
-
 end
