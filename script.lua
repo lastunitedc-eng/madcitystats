@@ -1,6 +1,6 @@
 --// Mad City Chapter 1 Stats Logger
---// Persistent Cash watcher + Discord webhook
---// Configuration is provided through getgenv()
+--// Cash milestone logger
+--// Persists progress through server hops when executor filesystem is supported
 
 --------------------------------------------------
 -- SERVICES
@@ -13,18 +13,66 @@ local Player = Players.LocalPlayer
 local env = getgenv and getgenv() or _G
 
 --------------------------------------------------
--- CONFIG
+-- SETTINGS
 --------------------------------------------------
-
-local WEBHOOK = env.MadCityWebhook
-local MIN_GAIN = tonumber(env.MadCityMinGain) or 10000
 
 local SCRIPT_URL =
     "https://raw.githubusercontent.com/lastunitedc-eng/madcitystats/main/script.lua"
 
+local CONFIG_FILE = "madcitystats_config.json"
+local STATE_FILE = "madcitystats_state.json"
+
 --------------------------------------------------
--- CHECK CONFIG
+-- FILESYSTEM SUPPORT
 --------------------------------------------------
+
+local hasFilesystem =
+    type(writefile) == "function"
+    and type(readfile) == "function"
+
+local function fileExists(path)
+    if type(isfile) == "function" then
+        local success, result = pcall(isfile, path)
+
+        if success then
+            return result
+        end
+    end
+
+    if type(readfile) == "function" then
+        return pcall(readfile, path)
+    end
+
+    return false
+end
+
+--------------------------------------------------
+-- LOAD SAVED CONFIG
+--------------------------------------------------
+
+local savedConfig = {}
+
+if hasFilesystem and fileExists(CONFIG_FILE) then
+    pcall(function()
+        savedConfig =
+            HttpService:JSONDecode(
+                readfile(CONFIG_FILE)
+            )
+    end)
+end
+
+--------------------------------------------------
+-- CONFIG
+--------------------------------------------------
+
+local WEBHOOK =
+    env.MadCityWebhook
+    or savedConfig.Webhook
+
+local MIN_GAIN =
+    tonumber(env.MadCityMinGain)
+    or tonumber(savedConfig.MinGain)
+    or 10000
 
 if not WEBHOOK or WEBHOOK == "" then
     error(
@@ -32,11 +80,112 @@ if not WEBHOOK or WEBHOOK == "" then
     )
 end
 
-print("[MadCity Stats] Starting...")
-print("[MadCity Stats] Minimum gain:", MIN_GAIN)
+env.MadCityWebhook = WEBHOOK
+env.MadCityMinGain = MIN_GAIN
 
 --------------------------------------------------
--- REQUEST FUNCTION
+-- SAVE CONFIG
+--------------------------------------------------
+
+if hasFilesystem then
+    pcall(function()
+
+        writefile(
+            CONFIG_FILE,
+
+            HttpService:JSONEncode({
+                Webhook = WEBHOOK,
+                MinGain = MIN_GAIN
+            })
+        )
+
+    end)
+end
+
+--------------------------------------------------
+-- LOAD SAVED PROGRESS
+--------------------------------------------------
+
+local accumulatedGain = 0
+
+if hasFilesystem and fileExists(STATE_FILE) then
+
+    local success, data = pcall(function()
+
+        return HttpService:JSONDecode(
+            readfile(STATE_FILE)
+        )
+
+    end)
+
+    if success and type(data) == "table" then
+
+        if tonumber(data.UserId) == Player.UserId then
+            accumulatedGain =
+                tonumber(data.AccumulatedGain) or 0
+        end
+
+    end
+end
+
+--------------------------------------------------
+-- SAVE PROGRESS
+--------------------------------------------------
+
+local function saveProgress()
+
+    env.MadCityAccumulatedGain =
+        accumulatedGain
+
+    if not hasFilesystem then
+        return
+    end
+
+    pcall(function()
+
+        writefile(
+            STATE_FILE,
+
+            HttpService:JSONEncode({
+                UserId = Player.UserId,
+                AccumulatedGain = accumulatedGain,
+                MinGain = MIN_GAIN
+            })
+        )
+
+    end)
+
+end
+
+saveProgress()
+
+--------------------------------------------------
+-- STARTUP
+--------------------------------------------------
+
+print("[MadCity Stats] Starting...")
+print("[MadCity Stats] Minimum gain:", MIN_GAIN)
+print(
+    "[MadCity Stats] Saved progress:",
+    accumulatedGain
+)
+
+if hasFilesystem then
+    print(
+        "[MadCity Stats] Persistent progress enabled."
+    )
+else
+    warn(
+        "[MadCity Stats] Executor filesystem unavailable."
+    )
+
+    warn(
+        "[MadCity Stats] Progress may reset after server hops."
+    )
+end
+
+--------------------------------------------------
+-- HTTP REQUEST
 --------------------------------------------------
 
 local requestFunc =
@@ -48,12 +197,12 @@ local requestFunc =
 
 if not requestFunc then
     error(
-        "[MadCity Stats] No supported HTTP request function found."
+        "[MadCity Stats] No HTTP request function found."
     )
 end
 
 --------------------------------------------------
--- QUEUE SCRIPT AFTER SERVER HOP
+-- QUEUE AFTER TELEPORT
 --------------------------------------------------
 
 local queueTeleport =
@@ -63,69 +212,98 @@ local queueTeleport =
 
 if queueTeleport then
 
-    -- Only queue once for the current server.
     if not env.MadCityStatsQueued then
 
         env.MadCityStatsQueued = true
 
-        local queuedCode = string.format([[
-            repeat
-                task.wait()
-            until game:IsLoaded()
+        local queuedCode
 
-            task.wait(2)
+        --------------------------------------------------
+        -- FILESYSTEM MODE
+        --------------------------------------------------
 
-            -- Restore config in the new server
-            getgenv().MadCityWebhook = %q
-            getgenv().MadCityMinGain = %d
+        if hasFilesystem then
 
-            -- Allow the newly loaded script to queue
-            -- itself for the NEXT teleport.
-            getgenv().MadCityStatsQueued = nil
+            queuedCode = string.format([[
+                repeat
+                    task.wait()
+                until game:IsLoaded()
 
-            -- Clear old state
-            getgenv().MadCityStatsRunning = nil
-            getgenv().MadCityCashConnection = nil
+                task.wait(2)
 
-            loadstring(game:HttpGet(%q))()
-        ]],
-            WEBHOOK,
-            MIN_GAIN,
-            SCRIPT_URL
-        )
+                getgenv().MadCityStatsQueued = nil
+                getgenv().MadCityStatsRunning = nil
+                getgenv().MadCityCashConnection = nil
 
-        local queuedSuccess, queuedError = pcall(function()
-            queueTeleport(queuedCode)
-        end)
+                loadstring(game:HttpGet(%q))()
+            ]],
+                SCRIPT_URL
+            )
 
-        if queuedSuccess then
+        --------------------------------------------------
+        -- FALLBACK MODE
+        --------------------------------------------------
+
+        else
+
+            queuedCode = string.format([[
+                repeat
+                    task.wait()
+                until game:IsLoaded()
+
+                task.wait(2)
+
+                getgenv().MadCityWebhook = %q
+                getgenv().MadCityMinGain = %d
+
+                getgenv().MadCityAccumulatedGain = %d
+
+                getgenv().MadCityStatsQueued = nil
+                getgenv().MadCityStatsRunning = nil
+                getgenv().MadCityCashConnection = nil
+
+                loadstring(game:HttpGet(%q))()
+            ]],
+                WEBHOOK,
+                MIN_GAIN,
+                accumulatedGain,
+                SCRIPT_URL
+            )
+
+        end
+
+        local success, err =
+            pcall(function()
+                queueTeleport(queuedCode)
+            end)
+
+        if success then
             print(
                 "[MadCity Stats] Queued for next server hop."
             )
         else
             warn(
-                "[MadCity Stats] Failed to queue after teleport:",
-                queuedError
+                "[MadCity Stats] queue_on_teleport error:",
+                err
             )
         end
-
     end
 
 else
 
     warn(
-        "[MadCity Stats] queue_on_teleport isn't available."
+        "[MadCity Stats] queue_on_teleport unavailable."
     )
 
 end
 
 --------------------------------------------------
--- PREVENT DUPLICATE INSTANCE
+-- PREVENT DUPLICATE WATCHERS
 --------------------------------------------------
 
 if env.MadCityStatsRunning then
     warn(
-        "[MadCity Stats] Logger already running in this server."
+        "[MadCity Stats] Already running."
     )
     return
 end
@@ -133,7 +311,7 @@ end
 env.MadCityStatsRunning = true
 
 --------------------------------------------------
--- REMOVE OLD CONNECTION
+-- OLD CONNECTION
 --------------------------------------------------
 
 if env.MadCityCashConnection then
@@ -146,20 +324,25 @@ if env.MadCityCashConnection then
 end
 
 --------------------------------------------------
--- WAIT FOR LEADERSTATS
+-- LEADERSTATS
 --------------------------------------------------
 
-print("[MadCity Stats] Waiting for leaderstats...")
+print(
+    "[MadCity Stats] Waiting for leaderstats..."
+)
 
 local leaderstats =
-    Player:WaitForChild("leaderstats", 60)
+    Player:WaitForChild(
+        "leaderstats",
+        60
+    )
 
 if not leaderstats then
 
     env.MadCityStatsRunning = false
 
     error(
-        "[MadCity Stats] leaderstats was not found."
+        "[MadCity Stats] leaderstats not found."
     )
 end
 
@@ -168,17 +351,23 @@ end
 --------------------------------------------------
 
 local Cash =
-    leaderstats:WaitForChild("Cash", 30)
+    leaderstats:WaitForChild(
+        "Cash",
+        30
+    )
 
 local Rank =
-    leaderstats:WaitForChild("Rank", 30)
+    leaderstats:WaitForChild(
+        "Rank",
+        30
+    )
 
 if not Cash then
 
     env.MadCityStatsRunning = false
 
     error(
-        "[MadCity Stats] Cash was not found."
+        "[MadCity Stats] Cash not found."
     )
 end
 
@@ -187,112 +376,157 @@ if not Rank then
     env.MadCityStatsRunning = false
 
     error(
-        "[MadCity Stats] Rank was not found."
+        "[MadCity Stats] Rank not found."
     )
 end
 
-print("[MadCity Stats] leaderstats found.")
-print("[MadCity Stats] Current Cash:", Cash.Value)
-print("[MadCity Stats] Current Rank:", Rank.Value)
+print(
+    "[MadCity Stats] leaderstats found."
+)
+
+print(
+    "[MadCity Stats] Current Cash:",
+    Cash.Value
+)
+
+print(
+    "[MadCity Stats] Current Rank:",
+    Rank.Value
+)
 
 --------------------------------------------------
--- NUMBER FORMATTER
+-- NUMBER FORMAT
 --------------------------------------------------
 
 local function formatNumber(number)
 
-    local num = tonumber(number) or 0
+    local num =
+        tonumber(number) or 0
 
-    local str =
+    local stringNumber =
         tostring(math.floor(num))
 
     while true do
 
         local newString, count =
-            str:gsub(
+            stringNumber:gsub(
                 "^(-?%d+)(%d%d%d)",
                 "%1,%2"
             )
 
-        str = newString
+        stringNumber = newString
 
         if count == 0 then
             break
         end
     end
 
-    return str
+    return stringNumber
 end
 
 --------------------------------------------------
 -- WEBHOOK URL
 --------------------------------------------------
 
-local function getWebhookURL()
+local function webhookURL()
 
-    if WEBHOOK:find("?", 1, true) then
-        return WEBHOOK .. "&wait=true"
+    if WEBHOOK:find(
+        "?",
+        1,
+        true
+    ) then
+
+        return WEBHOOK ..
+            "&wait=true"
+
     end
 
-    return WEBHOOK .. "?wait=true"
+    return WEBHOOK ..
+        "?wait=true"
+
 end
 
 --------------------------------------------------
--- SEND DISCORD MESSAGE
+-- SEND DISCORD
 --------------------------------------------------
 
-local function sendStats(gained, currentCash)
+local function sendWebhook(
+    gained,
+    currentCash
+)
 
     local payload = {
         username = "Mad City Stats",
 
         embeds = {
             {
-                title = "💰 Mad City Cash Update",
+                title =
+                    "💰 Mad City Cash Update",
 
                 description =
-                    "**" .. Player.DisplayName .. "**\n" ..
-                    "@" .. Player.Name,
+                    "**" ..
+                    Player.DisplayName ..
+                    "**\n@" ..
+                    Player.Name,
 
                 color = 5763719,
 
                 fields = {
                     {
-                        name = "💵 Cash Gained",
+                        name =
+                            "💵 Cash Gained",
+
                         value =
                             "+$" ..
-                            formatNumber(gained),
+                            formatNumber(
+                                gained
+                            ),
 
                         inline = true
                     },
 
                     {
-                        name = "💰 Current Cash",
+                        name =
+                            "💰 Current Cash",
+
                         value =
                             "$" ..
-                            formatNumber(currentCash),
+                            formatNumber(
+                                currentCash
+                            ),
 
                         inline = true
                     },
 
                     {
                         name = "⭐ Rank",
+
                         value =
-                            tostring(Rank.Value),
+                            tostring(
+                                Rank.Value
+                            ),
 
                         inline = true
                     },
 
                     {
-                        name = "👤 Username",
-                        value = Player.Name,
+                        name =
+                            "👤 Username",
+
+                        value =
+                            Player.Name,
+
                         inline = true
                     },
 
                     {
-                        name = "🆔 User ID",
+                        name =
+                            "🆔 User ID",
+
                         value =
-                            tostring(Player.UserId),
+                            tostring(
+                                Player.UserId
+                            ),
 
                         inline = true
                     }
@@ -300,8 +534,10 @@ local function sendStats(gained, currentCash)
 
                 footer = {
                     text =
-                        "Cash threshold: $" ..
-                        formatNumber(MIN_GAIN)
+                        "Threshold: $" ..
+                        formatNumber(
+                            MIN_GAIN
+                        )
                 },
 
                 timestamp =
@@ -312,46 +548,52 @@ local function sendStats(gained, currentCash)
         }
     }
 
-    local encoded
+    --------------------------------------------------
+    -- JSON
+    --------------------------------------------------
 
-    local encodeSuccess, encodeError =
+    local successEncode,
+          encoded =
         pcall(function()
 
-            encoded =
-                HttpService:JSONEncode(
-                    payload
-                )
+            return HttpService:JSONEncode(
+                payload
+            )
 
         end)
 
-    if not encodeSuccess then
+    if not successEncode then
 
         warn(
             "[MadCity Stats] JSON error:",
-            encodeError
+            encoded
         )
 
-        return
+        return false
     end
 
     --------------------------------------------------
-    -- SEND
+    -- REQUEST
     --------------------------------------------------
 
-    local success, response =
+    local success,
+          response =
         pcall(function()
 
             return requestFunc({
-                Url = getWebhookURL(),
+                Url =
+                    webhookURL(),
 
-                Method = "POST",
+                Method =
+                    "POST",
 
                 Headers = {
                     ["Content-Type"] =
                         "application/json"
                 },
 
-                Body = encoded
+                Body =
+                    encoded
             })
 
         end)
@@ -363,7 +605,7 @@ local function sendStats(gained, currentCash)
             response
         )
 
-        return
+        return false
     end
 
     --------------------------------------------------
@@ -384,11 +626,11 @@ local function sendStats(gained, currentCash)
 
     print(
         "[MadCity Stats] Discord sent",
-        "| Gained:",
+        "| Gain:",
         gained,
         "| Cash:",
         currentCash,
-        "| Status:",
+        "| HTTP:",
         status or "unknown"
     )
 
@@ -398,117 +640,133 @@ local function sendStats(gained, currentCash)
     then
 
         warn(
-            "[MadCity Stats] Discord HTTP error:",
+            "[MadCity Stats] HTTP error:",
             status
         )
 
-        if response.Body then
-            print(response.Body)
-        elseif response.body then
-            print(response.body)
-        end
-
+        return false
     end
+
+    return true
 end
 
 --------------------------------------------------
--- CASH WATCHER
+-- CURRENT CASH
 --------------------------------------------------
 
 local lastCash =
     tonumber(Cash.Value) or 0
 
-env.MadCityAccumulatedGain =
-    tonumber(env.MadCityAccumulatedGain) or 0
+--------------------------------------------------
+-- RESTORE GETGENV FALLBACK
+--------------------------------------------------
+
+if not hasFilesystem then
+
+    accumulatedGain =
+        tonumber(
+            env.MadCityAccumulatedGain
+        )
+        or accumulatedGain
+
+end
+
+saveProgress()
+
+--------------------------------------------------
+-- CASH WATCHER
+--------------------------------------------------
 
 env.MadCityCashConnection =
-    Cash:GetPropertyChangedSignal("Value")
-        :Connect(function()
+    Cash:GetPropertyChangedSignal(
+        "Value"
+    ):Connect(function()
 
-            --------------------------------------------------
-            -- NEW VALUE
-            --------------------------------------------------
+        local currentCash =
+            tonumber(Cash.Value)
 
-            local currentCash =
-                tonumber(Cash.Value)
+        if not currentCash then
+            return
+        end
 
-            if not currentCash then
-                return
-            end
+        local difference =
+            currentCash - lastCash
 
-            --------------------------------------------------
-            -- DIFFERENCE
-            --------------------------------------------------
+        --------------------------------------------------
+        -- POSITIVE CASH ONLY
+        --------------------------------------------------
 
-            local difference =
-                currentCash - lastCash
+        if difference > 0 then
 
-            --------------------------------------------------
-            -- ONLY COUNT POSITIVE GAINS
-            --------------------------------------------------
+            accumulatedGain +=
+                difference
 
-            if difference > 0 then
+            saveProgress()
 
-                accumulatedGain += difference
+            print(
+                "[MadCity Stats] +$" ..
+                formatNumber(
+                    difference
+                ),
 
-                print(
-                    "[MadCity Stats] +$" ..
-                    formatNumber(difference),
-
-                    "| Progress: $" ..
-                    formatNumber(
-                        accumulatedGain
-                    ) ..
-                    " / $" ..
-                    formatNumber(
-                        MIN_GAIN
-                    )
+                "| Progress: $" ..
+                formatNumber(
+                    accumulatedGain
+                ) ..
+                " / $" ..
+                formatNumber(
+                    MIN_GAIN
                 )
+            )
+
+            --------------------------------------------------
+            -- HIT THRESHOLD
+            --------------------------------------------------
+
+            if accumulatedGain >= MIN_GAIN then
+
+                local gained =
+                    accumulatedGain
 
                 --------------------------------------------------
-                -- THRESHOLD HIT
+                -- RESET FIRST
                 --------------------------------------------------
 
-                if accumulatedGain >= MIN_GAIN then
+                accumulatedGain = 0
+                saveProgress()
 
-                    local gained =
-                        accumulatedGain
+                task.spawn(function()
 
-                    accumulatedGain = 0
+                    local sent =
+                        sendWebhook(
+                            gained,
+                            currentCash
+                        )
 
-                    task.spawn(function()
+                    --------------------------------------------------
+                    -- IF WEBHOOK FAILED, RESTORE PROGRESS
+                    --------------------------------------------------
 
-                        local sendSuccess,
-                              sendError =
-                            pcall(function()
+                    if not sent then
 
-                                sendStats(
-                                    gained,
-                                    currentCash
-                                )
+                        accumulatedGain +=
+                            gained
 
-                            end)
+                        saveProgress()
 
-                        if not sendSuccess then
+                        warn(
+                            "[MadCity Stats] Restored progress because webhook failed."
+                        )
 
-                            warn(
-                                "[MadCity Stats] Send error:",
-                                sendError
-                            )
+                    end
 
-                        end
-                    end)
-
-                end
+                end)
             end
+        end
 
-            --------------------------------------------------
-            -- UPDATE PREVIOUS CASH
-            --------------------------------------------------
-
-            lastCash = currentCash
-
-        end)
+        lastCash =
+            currentCash
+    end)
 
 --------------------------------------------------
 -- READY
@@ -519,21 +777,20 @@ print(
 )
 
 print(
-    "[MadCity Stats] Discord notification every +$" ..
-    formatNumber(MIN_GAIN) ..
-    " earned."
+    "[MadCity Stats] Progress: $" ..
+    formatNumber(
+        accumulatedGain
+    ) ..
+    " / $" ..
+    formatNumber(
+        MIN_GAIN
+    )
 )
 
 if queueTeleport then
 
     print(
         "[MadCity Stats] Server-hop persistence enabled."
-    )
-
-else
-
-    print(
-        "[MadCity Stats] Server-hop persistence unavailable."
     )
 
 end
