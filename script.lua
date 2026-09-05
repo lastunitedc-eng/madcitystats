@@ -418,7 +418,8 @@ end
 local lastCash =
     tonumber(Cash.Value) or 0
 
-local accumulatedGain = 0
+env.MadCityAccumulatedGain =
+    tonumber(env.MadCityAccumulatedGain) or 0
 
 env.MadCityCashConnection =
     Cash:GetPropertyChangedSignal("Value")
